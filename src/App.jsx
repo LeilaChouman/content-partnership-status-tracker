@@ -315,17 +315,45 @@ export default function SharedTeamTracker() {
   };
 
   const exportToCSV = () => {
-    let csv = 'PO Number,PO Name,GEO,Expiry Date,Total Amount,Total Spent,Remaining\n';
+    // Enhanced CSV with ALL fields
+    let csv = 'PO Number,PO Name,GEO,Expiry Date,Total Amount,Total Spent,Remaining,Project Status,';
+    csv += '50% Invoice Status,50% Claim #,30% Invoice Status,30% Claim #,30% COC Date,20% Invoice Status,20% Claim #,20% COC Date,';
+    csv += 'Campaign Name,Supplier,Campaign Cost,Campaign Status,Proposal Status,BO Shared,Tracker Shared,Next Steps,Deadline\n';
+    
     pos.forEach(po => {
       const totalSpent = calculateTotalCost(po.campaigns);
       const remaining = calculateRemainingAmount(po.totalAmount, po.campaigns);
-      csv += `${po.poNumber},"${po.poName}",${po.geo},${po.expiryDate},${po.totalAmount},${totalSpent},${remaining}\n`;
+      
+      // Project status
+      const projectStatus = po.projectStatus.completed ? 'Completed' : po.projectStatus.live ? 'LIVE' : po.projectStatus.inPlanning ? 'In Planning' : 'Not Started';
+      
+      // Invoice statuses
+      const inv50Status = po.invoicing.invoice50.approved ? 'Approved' : po.invoicing.invoice50.toBeApproved ? 'To Be Approved' : po.invoicing.invoice50.shared ? 'Shared' : 'Not Started';
+      const inv30Status = po.invoicing.invoice30.approved ? 'Approved' : po.invoicing.invoice30.toBeApproved ? 'To Be Approved' : po.invoicing.invoice30.shared ? 'Shared' : 'Not Started';
+      const inv20Status = po.invoicing.invoice20.approved ? 'Approved' : po.invoicing.invoice20.toBeApproved ? 'To Be Approved' : po.invoicing.invoice20.shared ? 'Shared' : 'Not Started';
+      
+      if (po.campaigns && po.campaigns.length > 0) {
+        // Export each campaign as a separate row
+        po.campaigns.forEach(campaign => {
+          csv += `"${po.poNumber}","${po.poName}","${po.geo}","${po.expiryDate}",${po.totalAmount},${totalSpent},${remaining},"${projectStatus}",`;
+          csv += `"${inv50Status}","${po.invoicing.invoice50.claimNumber || ''}","${inv30Status}","${po.invoicing.invoice30.claimNumber || ''}","${po.invoicing.coc30.sharedOn || ''}",`;
+          csv += `"${inv20Status}","${po.invoicing.invoice20.claimNumber || ''}","${po.invoicing.coc20.sharedOn || ''}",`;
+          csv += `"${campaign.name}","${campaign.supplier}",${campaign.totalCost || ''},"${campaign.status}","${campaign.proposal}","${campaign.boShared}","${campaign.trackerShared}","${campaign.nextSteps || ''}","${campaign.deadline || ''}"\n`;
+        });
+      } else {
+        // PO without campaigns
+        csv += `"${po.poNumber}","${po.poName}","${po.geo}","${po.expiryDate}",${po.totalAmount},${totalSpent},${remaining},"${projectStatus}",`;
+        csv += `"${inv50Status}","${po.invoicing.invoice50.claimNumber || ''}","${inv30Status}","${po.invoicing.invoice30.claimNumber || ''}","${po.invoicing.coc30.sharedOn || ''}",`;
+        csv += `"${inv20Status}","${po.invoicing.invoice20.claimNumber || ''}","${po.invoicing.coc20.sharedOn || ''}",`;
+        csv += `"","","","","","","","",""\n`;
+      }
     });
+    
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `team_status_tracker_${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `team_status_tracker_complete_${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     window.URL.revokeObjectURL(url);
   };
@@ -392,10 +420,10 @@ export default function SharedTeamTracker() {
               <button
                 onClick={handleUndo}
                 className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition"
-                title={`Undo last action (${undoStack.length} available)`}
+                title="Undo last action"
               >
                 <Undo2 size={18} />
-                Undo ({undoStack.length})
+                Undo Last
               </button>
             )}
             <button
