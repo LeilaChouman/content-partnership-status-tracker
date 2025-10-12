@@ -1,3 +1,26 @@
+const ALLOWED_DOMAIN = [
+    '@omc.com',
+  '@sta.go.sa'
+  ];
+
+const handleSignUp = async (e) => {
+  e.preventDefault();
+  
+  // Check if email is from allowed domain
+  if (!email.toLowerCase().endsWith(ALLOWED_DOMAIN)) {
+    alert(`Only ${ALLOWED_DOMAIN} emails are allowed.`);
+    return;
+  }
+  
+  try {
+    await createUserWithEmailAndPassword(auth, email, password);
+    setEmail('');
+    setPassword('');
+  } catch (error) {
+    alert(error.message);
+  }
+};
+
 import { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, ChevronDown, ChevronUp } from 'lucide-react';
 
