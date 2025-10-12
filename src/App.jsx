@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Trash2, Download, ChevronDown, ChevronUp } from 'lucide-react';
+import { Plus, Trash2, Download, ChevronDown, ChevronUp, Users } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, getDoc, setDoc, where, serverTimestamp } from 'firebase/firestore';
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 
-export default function StatusTracker() {
+export default function MultiUserStatusTracker() {
   const firebaseConfig = {
     apiKey: "AIzaSyBiuX4eQjRXP-kRK0s8w-rxp3v2PJpR6SE",
     authDomain: "content-partnerships-status.firebaseapp.com",
@@ -14,7 +14,6 @@ export default function StatusTracker() {
     appId: "1:994875499391:web:2ace01420b2ca38c9ab04a"
   };
 
-  // Initialize Firebase only once using refs
   const appRef = useRef(null);
   const dbRef = useRef(null);
   const authRef = useRef(null);
@@ -33,12 +32,21 @@ export default function StatusTracker() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(true);
+  const [orgId, setOrgId] = useState(null);
+  const [userRole, setUserRole] = useState('viewer');
   const [pos, setPos] = useState([]);
+  const [activeUsers, setActiveUsers] = useState([]);
   const [expandedSections, setExpandedSections] = useState({});
   const [geoFilter, setGeoFilter] = useState('All');
 
   const geoOptions = ['All', 'APAC', 'MEA', 'E&A', 'COE (Plan)'];
 
+  // Collapse all functionality
+  const collapseAll = () => {
+    setExpandedSections({});
+  };
+
+  // Auth state listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -47,15 +55,92 @@ export default function StatusTracker() {
     return () => unsubscribe();
   }, [auth]);
 
+  // Fetch user's organization and role
   useEffect(() => {
     if (!user) return;
-    const posQuery = query(collection(db, 'users', user.uid, 'pos'));
+    
+    const fetchUserProfile = async () => {
+      try {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          setOrgId(userData.orgId || 'default-org');
+          setUserRole(userData.role || 'editor');
+        } else {
+          // Create default user profile if doesn't exist
+          const defaultOrgId = 'default-org';
+          await setDoc(doc(db, 'users', user.uid), {
+            email: user.email,
+            orgId: defaultOrgId,
+            role: 'editor',
+            createdAt: new Date().toISOString()
+          });
+          setOrgId(defaultOrgId);
+          setUserRole('editor');
+        }
+      } catch (error) {
+        console.error('Error fetching user profile:', error);
+      }
+    };
+    
+    fetchUserProfile();
+  }, [user, db]);
+
+  // Listen to organization POs (shared data)
+  useEffect(() => {
+    if (!user || !orgId) return;
+    
+    const posQuery = query(collection(db, 'organizations', orgId, 'pos'));
     const unsubscribe = onSnapshot(posQuery, (snapshot) => {
       const posData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setPos(posData.sort((a, b) => a.poNumber.localeCompare(b.poNumber)));
     });
+    
     return () => unsubscribe();
-  }, [user, db]);
+  }, [user, orgId, db]);
+
+  // Track user presence
+  useEffect(() => {
+    if (!user || !orgId) return;
+    
+    const presenceRef = doc(db, 'organizations', orgId, 'presence', user.uid);
+    
+    const setOnline = async () => {
+      await setDoc(presenceRef, {
+        email: user.email,
+        lastSeen: serverTimestamp(),
+        status: 'online'
+      });
+    };
+    
+    setOnline();
+    
+    return () => {
+      updateDoc(presenceRef, { 
+        status: 'offline',
+        lastSeen: serverTimestamp()
+      }).catch(() => {});
+    };
+  }, [user, orgId, db]);
+
+  // Listen to active users
+  useEffect(() => {
+    if (!orgId) return;
+    
+    const presenceQuery = query(
+      collection(db, 'organizations', orgId, 'presence'),
+      where('status', '==', 'online')
+    );
+    
+    const unsubscribe = onSnapshot(presenceQuery, (snapshot) => {
+      const users = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter(u => u.id !== user?.uid);
+      setActiveUsers(users);
+    });
+    
+    return () => unsubscribe();
+  }, [orgId, user, db]);
 
   const calculateTotalCost = (campaigns) => {
     if (!campaigns || !Array.isArray(campaigns)) return 0;
@@ -103,9 +188,13 @@ export default function StatusTracker() {
   };
 
   const addPO = async () => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') {
+      alert('You do not have permission to add POs. Contact your administrator.');
+      return;
+    }
     try {
-      await addDoc(collection(db, 'users', user.uid, 'pos'), {
+      await addDoc(collection(db, 'organizations', orgId, 'pos'), {
         poNumber: `PO-${String(pos.length + 1).padStart(3, '0')}`,
         poName: '',
         geo: 'APAC',
@@ -120,7 +209,8 @@ export default function StatusTracker() {
           invoice20: { notStarted: true, shared: false, toBeApproved: false, approved: false, claimNumber: '' }
         },
         projectStatus: { inPlanning: false, live: false, completed: false },
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        createdBy: user.email
       });
     } catch (error) {
       console.error('Error adding PO:', error);
@@ -129,10 +219,14 @@ export default function StatusTracker() {
   };
 
   const deletePO = async (id) => {
-    if (!user) return;
-    if (!window.confirm('Are you sure you want to delete this PO?')) return;
+    if (!user || !orgId) return;
+    if (userRole !== 'admin') {
+      alert('Only admins can delete POs.');
+      return;
+    }
+    if (!window.confirm('Are you sure you want to delete this PO? This will affect all users.')) return;
     try {
-      await deleteDoc(doc(db, 'users', user.uid, 'pos', id));
+      await deleteDoc(doc(db, 'organizations', orgId, 'pos', id));
     } catch (error) {
       console.error('Error deleting PO:', error);
       alert('Failed to delete PO: ' + error.message);
@@ -140,20 +234,33 @@ export default function StatusTracker() {
   };
 
   const updatePOField = async (id, field, value) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') return;
+    
+    // Fix: Don't auto-format PO number - keep user input as-is
+    let finalValue = value;
+    
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', id), { [field]: value });
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), { 
+        [field]: finalValue,
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
+      });
     } catch (error) {
       console.error('Error updating PO field:', error);
     }
   };
 
   const addCampaign = async (poId) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') {
+      alert('You do not have permission to add campaigns.');
+      return;
+    }
     const po = pos.find(p => p.id === poId);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', poId), {
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
         campaigns: [...(po.campaigns || []), {
           id: Date.now(),
           name: '',
@@ -165,7 +272,9 @@ export default function StatusTracker() {
           trackerShared: 'no',
           nextSteps: '',
           deadline: ''
-        }]
+        }],
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error('Error adding campaign:', error);
@@ -174,13 +283,19 @@ export default function StatusTracker() {
   };
 
   const deleteCampaign = async (poId, campaignId) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') {
+      alert('You do not have permission to delete campaigns.');
+      return;
+    }
     const po = pos.find(p => p.id === poId);
     if (!po) return;
     if (!window.confirm('Are you sure you want to delete this campaign?')) return;
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', poId), {
-        campaigns: (po.campaigns || []).filter(c => c.id !== campaignId)
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
+        campaigns: (po.campaigns || []).filter(c => c.id !== campaignId),
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error('Error deleting campaign:', error);
@@ -189,12 +304,15 @@ export default function StatusTracker() {
   };
 
   const updateCampaign = async (poId, campaignId, field, value) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') return;
     const po = pos.find(p => p.id === poId);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', poId), {
-        campaigns: (po.campaigns || []).map(c => c.id === campaignId ? { ...c, [field]: value } : c)
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
+        campaigns: (po.campaigns || []).map(c => c.id === campaignId ? { ...c, [field]: value } : c),
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error('Error updating campaign:', error);
@@ -202,7 +320,8 @@ export default function StatusTracker() {
   };
 
   const updateInvoicing = async (id, field, key, value) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') return;
     const po = pos.find(p => p.id === id);
     if (!po) return;
 
@@ -230,9 +349,11 @@ export default function StatusTracker() {
     }
 
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', id), {
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), {
         invoicing: updatedInvoicing,
-        projectStatus: updatedStatus
+        projectStatus: updatedStatus,
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error('Error updating invoicing:', error);
@@ -240,12 +361,15 @@ export default function StatusTracker() {
   };
 
   const updateProjectStatus = async (id, field, value) => {
-    if (!user) return;
+    if (!user || !orgId) return;
+    if (userRole === 'viewer') return;
     const po = pos.find(p => p.id === id);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'users', user.uid, 'pos', id), {
-        projectStatus: { ...po.projectStatus, [field]: value }
+      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), {
+        projectStatus: { ...po.projectStatus, [field]: value },
+        lastModifiedBy: user.email,
+        lastModifiedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error('Error updating project status:', error);
@@ -281,7 +405,7 @@ export default function StatusTracker() {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
         <div className="bg-white rounded-lg shadow-md p-8 w-full max-w-md">
           <h1 className="text-2xl font-bold text-gray-800 mb-2">Sign In</h1>
-          <p className="text-sm text-gray-600 mb-6">Contact your administrator for account access</p>
+          <p className="text-sm text-gray-600 mb-6">Access your organization's shared tracker</p>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
@@ -321,12 +445,48 @@ export default function StatusTracker() {
     );
   }
 
+  const isReadOnly = userRole === 'viewer';
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-6">
-          <h1 className="text-3xl font-bold text-gray-800">Client Project Status Tracker</h1>
+          <div>
+            <h1 className="text-3xl font-bold text-gray-800">Client Project Status Tracker</h1>
+            <p className="text-sm text-gray-500 mt-1">Organization: {orgId} • Role: <span className="font-medium capitalize">{userRole}</span></p>
+          </div>
           <div className="flex gap-3 items-center">
+            {activeUsers.length > 0 && (
+              <div className="flex items-center gap-2 bg-green-50 px-3 py-2 rounded-lg">
+                <Users size={16} className="text-green-600" />
+                <span className="text-sm text-green-700 font-medium">
+                  {activeUsers.length} online
+                </span>
+                <div className="flex -space-x-2 ml-1">
+                  {activeUsers.slice(0, 3).map((u, i) => (
+                    <div
+                      key={i}
+                      title={u.email}
+                      className="w-7 h-7 rounded-full bg-green-500 text-white flex items-center justify-center text-xs border-2 border-white font-medium"
+                    >
+                      {u.email[0].toUpperCase()}
+                    </div>
+                  ))}
+                  {activeUsers.length > 3 && (
+                    <div className="w-7 h-7 rounded-full bg-green-600 text-white flex items-center justify-center text-xs border-2 border-white">
+                      +{activeUsers.length - 3}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            <button
+              onClick={collapseAll}
+              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition"
+              title="Collapse all sections"
+            >
+              Collapse All
+            </button>
             <span className="text-sm text-gray-600">{user.email}</span>
             <button
               onClick={handleSignOut}
@@ -341,15 +501,25 @@ export default function StatusTracker() {
               <Download size={18} />
               Export CSV
             </button>
-            <button
-              onClick={addPO}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
-            >
-              <Plus size={18} />
-              Add PO
-            </button>
+            {!isReadOnly && (
+              <button
+                onClick={addPO}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+              >
+                <Plus size={18} />
+                Add PO
+              </button>
+            )}
           </div>
         </div>
+
+        {isReadOnly && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
+            <p className="text-sm text-yellow-800">
+              <strong>View-only mode:</strong> You can view all data but cannot make changes. Contact your administrator for edit access.
+            </p>
+          </div>
+        )}
 
         <div className="bg-white rounded-lg shadow-md p-4 mb-6">
           <div className="flex items-center justify-between mb-4">
@@ -407,6 +577,11 @@ export default function StatusTracker() {
                       <h2 className="text-xl font-bold">{po.poNumber}</h2>
                       {po.poName && <span className="text-purple-100">- {po.poName}</span>}
                       <span className="text-sm bg-white/20 px-3 py-1 rounded-full">{po.geo}</span>
+                      {po.lastModifiedBy && (
+                        <span className="text-xs text-purple-200">
+                          Last edited by {po.lastModifiedBy.split('@')[0]}
+                        </span>
+                      )}
                       <div className="flex-1 max-w-md ml-4">
                         <div className="flex items-center gap-2">
                           <div className="flex-1 bg-white/20 rounded-full h-2.5 overflow-hidden">
@@ -446,7 +621,8 @@ export default function StatusTracker() {
                               type="text"
                               value={po.poNumber}
                               onChange={(e) => updatePOField(po.id, 'poNumber', e.target.value)}
-                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                              disabled={isReadOnly}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed"
                             />
                           </div>
                           <div>
@@ -455,7 +631,8 @@ export default function StatusTracker() {
                               type="text"
                               value={po.poName}
                               onChange={(e) => updatePOField(po.id, 'poName', e.target.value)}
-                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                              disabled={isReadOnly}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed"
                               placeholder="Enter PO name"
                             />
                           </div>
@@ -464,7 +641,8 @@ export default function StatusTracker() {
                             <select
                               value={po.geo}
                               onChange={(e) => updatePOField(po.id, 'geo', e.target.value)}
-                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30"
+                              disabled={isReadOnly}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               <option value="APAC" className="text-gray-800">APAC</option>
                               <option value="MEA" className="text-gray-800">MEA</option>
@@ -478,16 +656,19 @@ export default function StatusTracker() {
                               type="date"
                               value={po.expiryDate}
                               onChange={(e) => updatePOField(po.id, 'expiryDate', e.target.value)}
-                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30"
+                              disabled={isReadOnly}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed"
                             />
                           </div>
                         </div>
-                        <button
-                          onClick={() => deletePO(po.id)}
-                          className="ml-4 p-2 text-white hover:bg-white/20 rounded-lg transition"
-                        >
-                          <Trash2 size={20} />
-                        </button>
+                        {userRole === 'admin' && (
+                          <button
+                            onClick={() => deletePO(po.id)}
+                            className="ml-4 p-2 text-white hover:bg-white/20 rounded-lg transition"
+                          >
+                            <Trash2 size={20} />
+                          </button>
+                        )}
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
@@ -496,7 +677,8 @@ export default function StatusTracker() {
                             type="number"
                             value={po.totalAmount}
                             onChange={(e) => updatePOField(po.id, 'totalAmount', e.target.value)}
-                            className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                            disabled={isReadOnly}
+                            className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed"
                             placeholder="0.00"
                           />
                         </div>
@@ -520,7 +702,7 @@ export default function StatusTracker() {
                             <input
                               type="checkbox"
                               checked={po.projectStatus.inPlanning}
-                              disabled={po.invoicing.invoice50.shared}
+                              disabled={po.invoicing.invoice50.shared || isReadOnly}
                               onChange={(e) => updateProjectStatus(po.id, 'inPlanning', e.target.checked)}
                               className="w-4 h-4 text-purple-400"
                             />
@@ -530,7 +712,7 @@ export default function StatusTracker() {
                             <input
                               type="checkbox"
                               checked={po.projectStatus.live}
-                              disabled={po.invoicing.coc30.checked}
+                              disabled={po.invoicing.coc30.checked || isReadOnly}
                               onChange={(e) => updateProjectStatus(po.id, 'live', e.target.checked)}
                               className="w-4 h-4 text-green-400"
                             />
@@ -540,6 +722,7 @@ export default function StatusTracker() {
                             <input
                               type="checkbox"
                               checked={po.projectStatus.completed}
+                              disabled={isReadOnly}
                               onChange={(e) => updateProjectStatus(po.id, 'completed', e.target.checked)}
                               className="w-4 h-4 text-purple-400"
                             />
@@ -570,6 +753,7 @@ export default function StatusTracker() {
                                 type="checkbox"
                                 checked={po.invoicing[inv].notStarted}
                                 onChange={(e) => updateInvoicing(po.id, inv, 'notStarted', e.target.checked)}
+                                disabled={isReadOnly}
                                 className="w-4 h-4 text-gray-600"
                               />
                               <span className="text-sm text-gray-700">Not Started</span>
@@ -579,6 +763,7 @@ export default function StatusTracker() {
                                 type="checkbox"
                                 checked={po.invoicing[inv].shared}
                                 onChange={(e) => updateInvoicing(po.id, inv, 'shared', e.target.checked)}
+                                disabled={isReadOnly}
                                 className="w-4 h-4 text-purple-600"
                               />
                               <span className="text-sm text-gray-700">Shared</span>
@@ -588,6 +773,7 @@ export default function StatusTracker() {
                                 type="checkbox"
                                 checked={po.invoicing[inv].toBeApproved}
                                 onChange={(e) => updateInvoicing(po.id, inv, 'toBeApproved', e.target.checked)}
+                                disabled={isReadOnly}
                                 className="w-4 h-4 text-orange-600"
                               />
                               <span className="text-sm text-gray-700 flex-1">To be approved by PM on ERP</span>
@@ -596,7 +782,8 @@ export default function StatusTracker() {
                                   type="text"
                                   value={po.invoicing[inv].claimNumber || ''}
                                   onChange={(e) => updateInvoicing(po.id, inv, 'claimNumber', e.target.value)}
-                                  className="border border-gray-300 rounded px-2 py-1 text-sm w-32"
+                                  disabled={isReadOnly}
+                                  className="border border-gray-300 rounded px-2 py-1 text-sm w-32 disabled:opacity-50 disabled:cursor-not-allowed"
                                   placeholder="Claim #"
                                 />
                               )}
@@ -606,6 +793,7 @@ export default function StatusTracker() {
                                 type="checkbox"
                                 checked={po.invoicing[inv].approved}
                                 onChange={(e) => updateInvoicing(po.id, inv, 'approved', e.target.checked)}
+                                disabled={isReadOnly}
                                 className="w-4 h-4 text-green-600"
                               />
                               <span className="text-sm text-gray-700">Approved by PM on ERP</span>
@@ -619,6 +807,7 @@ export default function StatusTracker() {
                             type="checkbox"
                             checked={po.invoicing.coc30.checked}
                             onChange={(e) => updateInvoicing(po.id, 'coc30', 'checked', e.target.checked)}
+                            disabled={isReadOnly}
                             className="w-4 h-4 text-purple-600"
                           />
                           <span className="text-sm font-semibold text-gray-800 flex-1">30% COC</span>
@@ -626,7 +815,8 @@ export default function StatusTracker() {
                             type="date"
                             value={po.invoicing.coc30.sharedOn || ''}
                             onChange={(e) => updateInvoicing(po.id, 'coc30', 'sharedOn', e.target.value)}
-                            className="border border-gray-300 rounded px-2 py-1 text-sm"
+                            disabled={isReadOnly}
+                            className="border border-gray-300 rounded px-2 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                           />
                         </div>
                       </div>
@@ -636,6 +826,7 @@ export default function StatusTracker() {
                             type="checkbox"
                             checked={po.invoicing.coc20.checked}
                             onChange={(e) => updateInvoicing(po.id, 'coc20', 'checked', e.target.checked)}
+                            disabled={isReadOnly}
                             className="w-4 h-4 text-purple-600"
                           />
                           <span className="text-sm font-semibold text-gray-800 flex-1">20% COC</span>
@@ -643,7 +834,8 @@ export default function StatusTracker() {
                             type="date"
                             value={po.invoicing.coc20.sharedOn || ''}
                             onChange={(e) => updateInvoicing(po.id, 'coc20', 'sharedOn', e.target.value)}
-                            className="border border-gray-300 rounded px-2 py-1 text-sm"
+                            disabled={isReadOnly}
+                            className="border border-gray-300 rounded px-2 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                           />
                         </div>
                       </div>
@@ -663,24 +855,28 @@ export default function StatusTracker() {
                   </button>
                   {isSectionExpanded(po.id, 'campaigns') && (
                     <div className="p-4 bg-gray-50">
-                      <button
-                        onClick={() => addCampaign(po.id)}
-                        className="mb-4 flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
-                      >
-                        <Plus size={16} />
-                        Add Campaign
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          onClick={() => addCampaign(po.id)}
+                          className="mb-4 flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+                        >
+                          <Plus size={16} />
+                          Add Campaign
+                        </button>
+                      )}
                       <div className="space-y-4">
                         {(po.campaigns || []).map(campaign => (
                           <div key={campaign.id} className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
                             <div className="flex justify-between items-start mb-3">
                               <h4 className="font-semibold text-gray-700">Campaign Details</h4>
-                              <button
-                                onClick={() => deleteCampaign(po.id, campaign.id)}
-                                className="text-red-500 hover:bg-red-50 p-1 rounded"
-                              >
-                                <Trash2 size={16} />
-                              </button>
+                              {!isReadOnly && (
+                                <button
+                                  onClick={() => deleteCampaign(po.id, campaign.id)}
+                                  className="text-red-500 hover:bg-red-50 p-1 rounded"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              )}
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div>
@@ -689,137 +885,8 @@ export default function StatusTracker() {
                                   type="text"
                                   value={campaign.name}
                                   onChange={(e) => updateCampaign(po.id, campaign.id, 'name', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                   placeholder="Enter campaign name"
                                 />
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Supplier Name</label>
-                                <input
-                                  type="text"
-                                  value={campaign.supplier}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'supplier', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                  placeholder="Enter supplier name"
-                                />
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Total Cost to Client (SAR)</label>
-                                <input
-                                  type="number"
-                                  value={campaign.totalCost}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'totalCost', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                  placeholder="0.00"
-                                />
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Status</label>
-                                <select
-                                  value={campaign.status}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'status', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                >
-                                  <option value="Not LIVE">Not LIVE</option>
-                                  <option value="LIVE">LIVE</option>
-                                  <option value="Completed">Completed</option>
-                                </select>
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Proposal</label>
-                                <select
-                                  value={campaign.proposal}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'proposal', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                >
-                                  <option value="Not Started">Not Started</option>
-                                  <option value="Requested">Requested</option>
-                                  <option value="Pending PM approval">Pending PM approval</option>
-                                  <option value="Approved by PM">Approved by PM</option>
-                                </select>
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">BO Shared</label>
-                                <select
-                                  value={campaign.boShared}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'boShared', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                >
-                                  <option value="no">No</option>
-                                  <option value="yes">Yes</option>
-                                </select>
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Tracker Shared</label>
-                                <select
-                                  value={campaign.trackerShared}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'trackerShared', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                >
-                                  <option value="no">No</option>
-                                  <option value="yes">Yes</option>
-                                </select>
-                              </div>
-                              <div className="md:col-span-2">
-                                <label className="text-xs text-gray-600 block mb-1">Next Steps</label>
-                                <textarea
-                                  value={campaign.nextSteps}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'nextSteps', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                  rows="3"
-                                  placeholder="Enter next steps..."
-                                />
-                              </div>
-                              <div>
-                                <label className="text-xs text-gray-600 block mb-1">Deadline Date</label>
-                                <input
-                                  type="date"
-                                  value={campaign.deadline}
-                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'deadline', e.target.value)}
-                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                        {(!po.campaigns || po.campaigns.length === 0) && (
-                          <div className="text-center py-8 text-gray-400">
-                            No campaigns added yet. Click "Add Campaign" to get started.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {filteredPos.length === 0 && pos.length > 0 && (
-          <div className="text-center py-12 text-gray-500">
-            <p className="text-lg mb-4">No POs found for {geoFilter}</p>
-            <button
-              onClick={() => setGeoFilter('All')}
-              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
-            >
-              Show All POs
-            </button>
-          </div>
-        )}
-
-        {pos.length === 0 && (
-          <div className="text-center py-12 text-gray-500">
-            <p className="text-lg mb-4">No POs added yet</p>
-            <button
-              onClick={addPO}
-              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
-            >
-              Add Your First PO
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+                              </div
