@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Trash2, Download, ChevronDown, ChevronUp, Users } from 'lucide-react';
+import { Plus, Trash2, Download, ChevronDown, ChevronUp, Undo2 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, getDoc, setDoc, where, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, setDoc } from 'firebase/firestore';
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 
-export default function MultiUserStatusTracker() {
+export default function SharedTeamTracker() {
   const firebaseConfig = {
     apiKey: "AIzaSyBiuX4eQjRXP-kRK0s8w-rxp3v2PJpR6SE",
     authDomain: "content-partnerships-status.firebaseapp.com",
@@ -24,7 +24,6 @@ export default function MultiUserStatusTracker() {
     authRef.current = getAuth(appRef.current);
   }
 
-  const app = appRef.current;
   const db = dbRef.current;
   const auth = authRef.current;
 
@@ -32,17 +31,55 @@ export default function MultiUserStatusTracker() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(true);
-  const [orgId, setOrgId] = useState(null);
-  const [userRole, setUserRole] = useState('viewer');
   const [pos, setPos] = useState([]);
-  const [activeUsers, setActiveUsers] = useState([]);
   const [expandedSections, setExpandedSections] = useState({});
   const [geoFilter, setGeoFilter] = useState('All');
+  const [undoStack, setUndoStack] = useState([]);
 
   const geoOptions = ['All', 'APAC', 'MEA', 'E&A', 'COE (Plan)'];
 
   const collapseAll = () => {
     setExpandedSections({});
+  };
+
+  // Undo system
+  const addToUndoStack = (action) => {
+    setUndoStack(prev => [...prev.slice(-9), action]); // Keep last 10 actions
+  };
+
+  const handleUndo = async () => {
+    if (undoStack.length === 0) {
+      alert('Nothing to undo');
+      return;
+    }
+
+    const lastAction = undoStack[undoStack.length - 1];
+    
+    try {
+      if (lastAction.type === 'delete_po') {
+        // Restore deleted PO
+        await setDoc(doc(db, 'shared_pos', lastAction.data.id), lastAction.data);
+      } else if (lastAction.type === 'delete_campaign') {
+        // Restore deleted campaign
+        const po = pos.find(p => p.id === lastAction.poId);
+        if (po) {
+          await updateDoc(doc(db, 'shared_pos', lastAction.poId), {
+            campaigns: [...(po.campaigns || []), lastAction.data]
+          });
+        }
+      } else if (lastAction.type === 'update') {
+        // Restore previous value
+        await updateDoc(doc(db, 'shared_pos', lastAction.id), {
+          [lastAction.field]: lastAction.oldValue
+        });
+      }
+      
+      setUndoStack(prev => prev.slice(0, -1));
+      alert('Action undone!');
+    } catch (error) {
+      console.error('Undo error:', error);
+      alert('Failed to undo: ' + error.message);
+    }
   };
 
   useEffect(() => {
@@ -56,84 +93,15 @@ export default function MultiUserStatusTracker() {
   useEffect(() => {
     if (!user) return;
     
-    const fetchUserProfile = async () => {
-      try {
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
-          setOrgId(userData.orgId || 'default-org');
-          setUserRole(userData.role || 'editor');
-        } else {
-          const defaultOrgId = 'default-org';
-          await setDoc(doc(db, 'users', user.uid), {
-            email: user.email,
-            orgId: defaultOrgId,
-            role: 'editor',
-            createdAt: new Date().toISOString()
-          });
-          setOrgId(defaultOrgId);
-          setUserRole('editor');
-        }
-      } catch (error) {
-        console.error('Error fetching user profile:', error);
-      }
-    };
-    
-    fetchUserProfile();
-  }, [user, db]);
-
-  useEffect(() => {
-    if (!user || !orgId) return;
-    
-    const posQuery = query(collection(db, 'organizations', orgId, 'pos'));
+    // Listen to SHARED POs - everyone sees the same data
+    const posQuery = query(collection(db, 'shared_pos'));
     const unsubscribe = onSnapshot(posQuery, (snapshot) => {
       const posData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setPos(posData.sort((a, b) => a.poNumber.localeCompare(b.poNumber)));
     });
     
     return () => unsubscribe();
-  }, [user, orgId, db]);
-
-  useEffect(() => {
-    if (!user || !orgId) return;
-    
-    const presenceRef = doc(db, 'organizations', orgId, 'presence', user.uid);
-    
-    const setOnline = async () => {
-      await setDoc(presenceRef, {
-        email: user.email,
-        lastSeen: serverTimestamp(),
-        status: 'online'
-      });
-    };
-    
-    setOnline();
-    
-    return () => {
-      updateDoc(presenceRef, { 
-        status: 'offline',
-        lastSeen: serverTimestamp()
-      }).catch(() => {});
-    };
-  }, [user, orgId, db]);
-
-  useEffect(() => {
-    if (!orgId) return;
-    
-    const presenceQuery = query(
-      collection(db, 'organizations', orgId, 'presence'),
-      where('status', '==', 'online')
-    );
-    
-    const unsubscribe = onSnapshot(presenceQuery, (snapshot) => {
-      const users = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter(u => u.id !== user?.uid);
-      setActiveUsers(users);
-    });
-    
-    return () => unsubscribe();
-  }, [orgId, user, db]);
+  }, [user, db]);
 
   const calculateTotalCost = (campaigns) => {
     if (!campaigns || !Array.isArray(campaigns)) return 0;
@@ -181,13 +149,9 @@ export default function MultiUserStatusTracker() {
   };
 
   const addPO = async () => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') {
-      alert('You do not have permission to add POs. Contact your administrator.');
-      return;
-    }
+    if (!user) return;
     try {
-      await addDoc(collection(db, 'organizations', orgId, 'pos'), {
+      await addDoc(collection(db, 'shared_pos'), {
         poNumber: `PO-${String(pos.length + 1).padStart(3, '0')}`,
         poName: '',
         geo: 'APAC',
@@ -212,14 +176,14 @@ export default function MultiUserStatusTracker() {
   };
 
   const deletePO = async (id) => {
-    if (!user || !orgId) return;
-    if (userRole !== 'admin') {
-      alert('Only admins can delete POs.');
-      return;
-    }
-    if (!window.confirm('Are you sure you want to delete this PO? This will affect all users.')) return;
+    if (!user) return;
+    const po = pos.find(p => p.id === id);
+    if (!po) return;
+    if (!window.confirm('Are you sure you want to delete this PO? You can undo this action.')) return;
     try {
-      await deleteDoc(doc(db, 'organizations', orgId, 'pos', id));
+      // Save to undo stack
+      addToUndoStack({ type: 'delete_po', data: po });
+      await deleteDoc(doc(db, 'shared_pos', id));
     } catch (error) {
       console.error('Error deleting PO:', error);
       alert('Failed to delete PO: ' + error.message);
@@ -227,29 +191,26 @@ export default function MultiUserStatusTracker() {
   };
 
   const updatePOField = async (id, field, value) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') return;
+    if (!user) return;
+    const po = pos.find(p => p.id === id);
+    if (!po) return;
+    
+    // Save old value to undo stack
+    addToUndoStack({ type: 'update', id, field, oldValue: po[field], newValue: value });
+    
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), { 
-        [field]: value,
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
-      });
+      await updateDoc(doc(db, 'shared_pos', id), { [field]: value });
     } catch (error) {
       console.error('Error updating PO field:', error);
     }
   };
 
   const addCampaign = async (poId) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') {
-      alert('You do not have permission to add campaigns.');
-      return;
-    }
+    if (!user) return;
     const po = pos.find(p => p.id === poId);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
+      await updateDoc(doc(db, 'shared_pos', poId), {
         campaigns: [...(po.campaigns || []), {
           id: Date.now(),
           name: '',
@@ -261,9 +222,7 @@ export default function MultiUserStatusTracker() {
           trackerShared: 'no',
           nextSteps: '',
           deadline: ''
-        }],
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
+        }]
       });
     } catch (error) {
       console.error('Error adding campaign:', error);
@@ -272,19 +231,18 @@ export default function MultiUserStatusTracker() {
   };
 
   const deleteCampaign = async (poId, campaignId) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') {
-      alert('You do not have permission to delete campaigns.');
-      return;
-    }
+    if (!user) return;
     const po = pos.find(p => p.id === poId);
     if (!po) return;
-    if (!window.confirm('Are you sure you want to delete this campaign?')) return;
+    const campaign = po.campaigns?.find(c => c.id === campaignId);
+    if (!campaign) return;
+    if (!window.confirm('Are you sure you want to delete this campaign? You can undo this action.')) return;
+    
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
-        campaigns: (po.campaigns || []).filter(c => c.id !== campaignId),
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
+      // Save to undo stack
+      addToUndoStack({ type: 'delete_campaign', poId, data: campaign });
+      await updateDoc(doc(db, 'shared_pos', poId), {
+        campaigns: (po.campaigns || []).filter(c => c.id !== campaignId)
       });
     } catch (error) {
       console.error('Error deleting campaign:', error);
@@ -293,15 +251,12 @@ export default function MultiUserStatusTracker() {
   };
 
   const updateCampaign = async (poId, campaignId, field, value) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') return;
+    if (!user) return;
     const po = pos.find(p => p.id === poId);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', poId), {
-        campaigns: (po.campaigns || []).map(c => c.id === campaignId ? { ...c, [field]: value } : c),
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
+      await updateDoc(doc(db, 'shared_pos', poId), {
+        campaigns: (po.campaigns || []).map(c => c.id === campaignId ? { ...c, [field]: value } : c)
       });
     } catch (error) {
       console.error('Error updating campaign:', error);
@@ -309,8 +264,7 @@ export default function MultiUserStatusTracker() {
   };
 
   const updateInvoicing = async (id, field, key, value) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') return;
+    if (!user) return;
     const po = pos.find(p => p.id === id);
     if (!po) return;
 
@@ -338,11 +292,9 @@ export default function MultiUserStatusTracker() {
     }
 
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), {
+      await updateDoc(doc(db, 'shared_pos', id), {
         invoicing: updatedInvoicing,
-        projectStatus: updatedStatus,
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
+        projectStatus: updatedStatus
       });
     } catch (error) {
       console.error('Error updating invoicing:', error);
@@ -350,15 +302,12 @@ export default function MultiUserStatusTracker() {
   };
 
   const updateProjectStatus = async (id, field, value) => {
-    if (!user || !orgId) return;
-    if (userRole === 'viewer') return;
+    if (!user) return;
     const po = pos.find(p => p.id === id);
     if (!po) return;
     try {
-      await updateDoc(doc(db, 'organizations', orgId, 'pos', id), {
-        projectStatus: { ...po.projectStatus, [field]: value },
-        lastModifiedBy: user.email,
-        lastModifiedAt: new Date().toISOString()
+      await updateDoc(doc(db, 'shared_pos', id), {
+        projectStatus: { ...po.projectStatus, [field]: value }
       });
     } catch (error) {
       console.error('Error updating project status:', error);
@@ -376,7 +325,7 @@ export default function MultiUserStatusTracker() {
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `status_tracker_${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `team_status_tracker_${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     window.URL.revokeObjectURL(url);
   };
@@ -393,8 +342,8 @@ export default function MultiUserStatusTracker() {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
         <div className="bg-white rounded-lg shadow-md p-8 w-full max-w-md">
-          <h1 className="text-2xl font-bold text-gray-800 mb-2">Sign In</h1>
-          <p className="text-sm text-gray-600 mb-6">Access your organization's shared tracker</p>
+          <h1 className="text-2xl font-bold text-gray-800 mb-2">Team Status Tracker</h1>
+          <p className="text-sm text-gray-600 mb-6">Sign in to access the shared team tracker</p>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
@@ -430,58 +379,53 @@ export default function MultiUserStatusTracker() {
     );
   }
 
-  const isReadOnly = userRole === 'viewer';
-
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-gray-800">Client Project Status Tracker</h1>
-            <p className="text-sm text-gray-500 mt-1">Organization: {orgId} • Role: <span className="font-medium capitalize">{userRole}</span></p>
+            <h1 className="text-3xl font-bold text-gray-800">Team Status Tracker</h1>
+            <p className="text-sm text-gray-500 mt-1">Shared workspace • {user.email}</p>
           </div>
           <div className="flex gap-3 items-center">
-            {activeUsers.length > 0 && (
-              <div className="flex items-center gap-2 bg-green-50 px-3 py-2 rounded-lg">
-                <Users size={16} className="text-green-600" />
-                <span className="text-sm text-green-700 font-medium">{activeUsers.length} online</span>
-                <div className="flex -space-x-2 ml-1">
-                  {activeUsers.slice(0, 3).map((u, i) => (
-                    <div key={i} title={u.email} className="w-7 h-7 rounded-full bg-green-500 text-white flex items-center justify-center text-xs border-2 border-white font-medium">
-                      {u.email[0].toUpperCase()}
-                    </div>
-                  ))}
-                  {activeUsers.length > 3 && (
-                    <div className="w-7 h-7 rounded-full bg-green-600 text-white flex items-center justify-center text-xs border-2 border-white">
-                      +{activeUsers.length - 3}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-            <button onClick={collapseAll} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition" title="Collapse all sections">
-              Collapse All
-            </button>
-            <span className="text-sm text-gray-600">{user.email}</span>
-            <button onClick={handleSignOut} className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition">
-              Sign Out
-            </button>
-            <button onClick={exportToCSV} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition">
-              <Download size={18} />Export CSV
-            </button>
-            {!isReadOnly && (
-              <button onClick={addPO} className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">
-                <Plus size={18} />Add PO
+            {undoStack.length > 0 && (
+              <button
+                onClick={handleUndo}
+                className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition"
+                title={`Undo last action (${undoStack.length} available)`}
+              >
+                <Undo2 size={18} />
+                Undo ({undoStack.length})
               </button>
             )}
+            <button
+              onClick={collapseAll}
+              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition"
+            >
+              Collapse All
+            </button>
+            <button
+              onClick={handleSignOut}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition"
+            >
+              Sign Out
+            </button>
+            <button
+              onClick={exportToCSV}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+            >
+              <Download size={18} />
+              Export CSV
+            </button>
+            <button
+              onClick={addPO}
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+            >
+              <Plus size={18} />
+              Add PO
+            </button>
           </div>
         </div>
-
-        {isReadOnly && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
-            <p className="text-sm text-yellow-800"><strong>View-only mode:</strong> You can view all data but cannot make changes. Contact your administrator for edit access.</p>
-          </div>
-        )}
 
         <div className="bg-white rounded-lg shadow-md p-4 mb-6">
           <div className="flex items-center justify-between mb-4">
@@ -489,7 +433,15 @@ export default function MultiUserStatusTracker() {
               <label className="text-sm font-semibold text-gray-700">Filter by GEO:</label>
               <div className="flex gap-2">
                 {geoOptions.map(geo => (
-                  <button key={geo} onClick={() => setGeoFilter(geo)} className={`px-4 py-2 rounded-lg transition ${geoFilter === geo ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+                  <button
+                    key={geo}
+                    onClick={() => setGeoFilter(geo)}
+                    className={`px-4 py-2 rounded-lg transition ${
+                      geoFilter === geo
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
                     {geo}
                   </button>
                 ))}
@@ -498,12 +450,20 @@ export default function MultiUserStatusTracker() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-gray-200">
             <div className="bg-purple-50 rounded-lg p-4">
-              <div className="text-sm text-purple-600 font-medium mb-1">Total Planned Budget {geoFilter !== 'All' ? `(${geoFilter})` : '(All Regions)'}</div>
-              <div className="text-2xl font-bold text-purple-700">{totalPlanned.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR</div>
+              <div className="text-sm text-purple-600 font-medium mb-1">
+                Total Planned Budget {geoFilter !== 'All' ? `(${geoFilter})` : '(All Regions)'}
+              </div>
+              <div className="text-2xl font-bold text-purple-700">
+                {totalPlanned.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR
+              </div>
             </div>
             <div className="bg-indigo-50 rounded-lg p-4">
-              <div className="text-sm text-indigo-600 font-medium mb-1">Total Consumed Budget {geoFilter !== 'All' ? `(${geoFilter})` : '(All Regions)'}</div>
-              <div className="text-2xl font-bold text-indigo-700">{totalConsumed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR</div>
+              <div className="text-sm text-indigo-600 font-medium mb-1">
+                Total Consumed Budget {geoFilter !== 'All' ? `(${geoFilter})` : '(All Regions)'}
+              </div>
+              <div className="text-2xl font-bold text-indigo-700">
+                {totalConsumed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR
+              </div>
             </div>
           </div>
         </div>
@@ -515,18 +475,38 @@ export default function MultiUserStatusTracker() {
             return (
               <div key={po.id} className="bg-white rounded-lg shadow-md overflow-hidden">
                 <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white">
-                  <button onClick={() => toggleSection(po.id, 'header')} className="w-full p-4 flex items-center justify-between hover:bg-white/10 transition">
+                  <button
+                    onClick={() => toggleSection(po.id, 'header')}
+                    className="w-full p-4 flex items-center justify-between hover:bg-white/10 transition"
+                  >
                     <div className="flex items-center gap-4 flex-1">
                       <h2 className="text-xl font-bold">{po.poNumber}</h2>
                       {po.poName && <span className="text-purple-100">- {po.poName}</span>}
                       <span className="text-sm bg-white/20 px-3 py-1 rounded-full">{po.geo}</span>
-                      {po.lastModifiedBy && <span className="text-xs text-purple-200">Last edited by {po.lastModifiedBy.split('@')[0]}</span>}
                       <div className="flex-1 max-w-md ml-4">
                         <div className="flex items-center gap-2">
                           <div className="flex-1 bg-white/20 rounded-full h-2.5 overflow-hidden">
-                            <div className={`h-full transition-all duration-300 ${po.projectStatus.completed ? 'bg-purple-400 w-full' : po.projectStatus.live ? 'bg-green-400 w-2/3' : po.projectStatus.inPlanning ? 'bg-purple-300 w-1/3' : 'bg-gray-400 w-0'}`} />
+                            <div
+                              className={`h-full transition-all duration-300 ${
+                                po.projectStatus.completed
+                                  ? 'bg-purple-400 w-full'
+                                  : po.projectStatus.live
+                                  ? 'bg-green-400 w-2/3'
+                                  : po.projectStatus.inPlanning
+                                  ? 'bg-purple-300 w-1/3'
+                                  : 'bg-gray-400 w-0'
+                              }`}
+                            />
                           </div>
-                          <span className="text-xs text-purple-100 min-w-[80px]">{po.projectStatus.completed ? 'Completed' : po.projectStatus.live ? 'LIVE' : po.projectStatus.inPlanning ? 'Planning' : 'Not Started'}</span>
+                          <span className="text-xs text-purple-100 min-w-[80px]">
+                            {po.projectStatus.completed
+                              ? 'Completed'
+                              : po.projectStatus.live
+                              ? 'LIVE'
+                              : po.projectStatus.inPlanning
+                              ? 'Planning'
+                              : 'Not Started'}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -538,15 +518,30 @@ export default function MultiUserStatusTracker() {
                         <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
                           <div>
                             <label className="text-xs text-purple-100 block mb-1">PO Number</label>
-                            <input type="text" value={po.poNumber} onChange={(e) => updatePOField(po.id, 'poNumber', e.target.value)} disabled={isReadOnly} className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            <input
+                              type="text"
+                              value={po.poNumber}
+                              onChange={(e) => updatePOField(po.id, 'poNumber', e.target.value)}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                            />
                           </div>
                           <div>
                             <label className="text-xs text-purple-100 block mb-1">PO Name</label>
-                            <input type="text" value={po.poName} onChange={(e) => updatePOField(po.id, 'poName', e.target.value)} disabled={isReadOnly} className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter PO name" />
+                            <input
+                              type="text"
+                              value={po.poName}
+                              onChange={(e) => updatePOField(po.id, 'poName', e.target.value)}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                              placeholder="Enter PO name"
+                            />
                           </div>
                           <div>
                             <label className="text-xs text-purple-100 block mb-1">GEO</label>
-                            <select value={po.geo} onChange={(e) => updatePOField(po.id, 'geo', e.target.value)} disabled={isReadOnly} className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <select
+                              value={po.geo}
+                              onChange={(e) => updatePOField(po.id, 'geo', e.target.value)}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30"
+                            >
                               <option value="APAC" className="text-gray-800">APAC</option>
                               <option value="MEA" className="text-gray-800">MEA</option>
                               <option value="E&A" className="text-gray-800">E&A</option>
@@ -555,42 +550,76 @@ export default function MultiUserStatusTracker() {
                           </div>
                           <div>
                             <label className="text-xs text-purple-100 block mb-1">Expiry Date</label>
-                            <input type="date" value={po.expiryDate} onChange={(e) => updatePOField(po.id, 'expiryDate', e.target.value)} disabled={isReadOnly} className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed" />
+                            <input
+                              type="date"
+                              value={po.expiryDate}
+                              onChange={(e) => updatePOField(po.id, 'expiryDate', e.target.value)}
+                              className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white focus:outline-none focus:bg-white/30"
+                            />
                           </div>
                         </div>
-                        {userRole === 'admin' && (
-                          <button onClick={() => deletePO(po.id)} className="ml-4 p-2 text-white hover:bg-white/20 rounded-lg transition">
-                            <Trash2 size={20} />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => deletePO(po.id)}
+                          className="ml-4 p-2 text-white hover:bg-white/20 rounded-lg transition"
+                          title="Delete PO (can be undone)"
+                        >
+                          <Trash2 size={20} />
+                        </button>
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                           <label className="text-xs text-purple-100 block mb-1">PO Total Amount (SAR)</label>
-                          <input type="number" value={po.totalAmount} onChange={(e) => updatePOField(po.id, 'totalAmount', e.target.value)} disabled={isReadOnly} className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="0.00" />
+                          <input
+                            type="number"
+                            value={po.totalAmount}
+                            onChange={(e) => updatePOField(po.id, 'totalAmount', e.target.value)}
+                            className="w-full bg-white/20 border border-white/30 rounded px-3 py-2 text-white placeholder-white/60 focus:outline-none focus:bg-white/30"
+                            placeholder="0.00"
+                          />
                         </div>
                         <div className="bg-white/20 rounded p-3">
                           <div className="text-xs text-purple-100 mb-1">Total Spent</div>
-                          <div className="text-xl font-bold">{totalSpent.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR</div>
+                          <div className="text-xl font-bold">
+                            {totalSpent.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR
+                          </div>
                         </div>
                         <div className={`rounded p-3 ${remaining < 0 ? 'bg-red-500' : 'bg-white/20'}`}>
                           <div className="text-xs text-purple-100 mb-1">Remaining</div>
-                          <div className="text-xl font-bold">{remaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR</div>
+                          <div className="text-xl font-bold">
+                            {remaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SAR
+                          </div>
                         </div>
                       </div>
                       <div className="mt-4 pt-4 border-t border-white/20">
                         <label className="text-xs text-purple-100 block mb-2">Project Status</label>
                         <div className="flex gap-4">
                           <div className="flex items-center gap-2">
-                            <input type="checkbox" checked={po.projectStatus.inPlanning} disabled={po.invoicing.invoice50.shared || isReadOnly} onChange={(e) => updateProjectStatus(po.id, 'inPlanning', e.target.checked)} className="w-4 h-4 text-purple-400" />
+                            <input
+                              type="checkbox"
+                              checked={po.projectStatus.inPlanning}
+                              disabled={po.invoicing.invoice50.shared}
+                              onChange={(e) => updateProjectStatus(po.id, 'inPlanning', e.target.checked)}
+                              className="w-4 h-4 text-purple-400"
+                            />
                             <span className="text-sm text-purple-100">In Planning</span>
                           </div>
                           <div className="flex items-center gap-2">
-                            <input type="checkbox" checked={po.projectStatus.live} disabled={po.invoicing.coc30.checked || isReadOnly} onChange={(e) => updateProjectStatus(po.id, 'live', e.target.checked)} className="w-4 h-4 text-green-400" />
+                            <input
+                              type="checkbox"
+                              checked={po.projectStatus.live}
+                              disabled={po.invoicing.coc30.checked}
+                              onChange={(e) => updateProjectStatus(po.id, 'live', e.target.checked)}
+                              className="w-4 h-4 text-green-400"
+                            />
                             <span className="text-sm text-purple-100">LIVE</span>
                           </div>
                           <div className="flex items-center gap-2">
-                            <input type="checkbox" checked={po.projectStatus.completed} disabled={isReadOnly} onChange={(e) => updateProjectStatus(po.id, 'completed', e.target.checked)} className="w-4 h-4 text-purple-400" />
+                            <input
+                              type="checkbox"
+                              checked={po.projectStatus.completed}
+                              onChange={(e) => updateProjectStatus(po.id, 'completed', e.target.checked)}
+                              className="w-4 h-4 text-purple-400"
+                            />
                             <span className="text-sm text-purple-100">Completed</span>
                           </div>
                         </div>
@@ -600,7 +629,10 @@ export default function MultiUserStatusTracker() {
                 </div>
 
                 <div className="border-b border-gray-200">
-                  <button onClick={() => toggleSection(po.id, 'invoicing')} className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition">
+                  <button
+                    onClick={() => toggleSection(po.id, 'invoicing')}
+                    className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition"
+                  >
                     <h3 className="text-lg font-semibold text-gray-800">1. Invoicing & COCs</h3>
                     {isSectionExpanded(po.id, 'invoicing') ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
                   </button>
@@ -611,22 +643,48 @@ export default function MultiUserStatusTracker() {
                           <h4 className="font-semibold text-gray-800 mb-3">{['50', '30', '20'][idx]}% Invoice</h4>
                           <div className="space-y-2">
                             <div className="flex items-center gap-3">
-                              <input type="checkbox" checked={po.invoicing[inv].notStarted} onChange={(e) => updateInvoicing(po.id, inv, 'notStarted', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-gray-600" />
+                              <input
+                                type="checkbox"
+                                checked={po.invoicing[inv].notStarted}
+                                onChange={(e) => updateInvoicing(po.id, inv, 'notStarted', e.target.checked)}
+                                className="w-4 h-4 text-gray-600"
+                              />
                               <span className="text-sm text-gray-700">Not Started</span>
                             </div>
                             <div className="flex items-center gap-3">
-                              <input type="checkbox" checked={po.invoicing[inv].shared} onChange={(e) => updateInvoicing(po.id, inv, 'shared', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-purple-600" />
+                              <input
+                                type="checkbox"
+                                checked={po.invoicing[inv].shared}
+                                onChange={(e) => updateInvoicing(po.id, inv, 'shared', e.target.checked)}
+                                className="w-4 h-4 text-purple-600"
+                              />
                               <span className="text-sm text-gray-700">Shared</span>
                             </div>
                             <div className="flex items-center gap-3">
-                              <input type="checkbox" checked={po.invoicing[inv].toBeApproved} onChange={(e) => updateInvoicing(po.id, inv, 'toBeApproved', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-orange-600" />
+                              <input
+                                type="checkbox"
+                                checked={po.invoicing[inv].toBeApproved}
+                                onChange={(e) => updateInvoicing(po.id, inv, 'toBeApproved', e.target.checked)}
+                                className="w-4 h-4 text-orange-600"
+                              />
                               <span className="text-sm text-gray-700 flex-1">To be approved by PM on ERP</span>
                               {po.invoicing[inv].toBeApproved && (
-                                <input type="text" value={po.invoicing[inv].claimNumber || ''} onChange={(e) => updateInvoicing(po.id, inv, 'claimNumber', e.target.value)} disabled={isReadOnly} className="border border-gray-300 rounded px-2 py-1 text-sm w-32 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Claim #" />
+                                <input
+                                  type="text"
+                                  value={po.invoicing[inv].claimNumber || ''}
+                                  onChange={(e) => updateInvoicing(po.id, inv, 'claimNumber', e.target.value)}
+                                  className="border border-gray-300 rounded px-2 py-1 text-sm w-32"
+                                  placeholder="Claim #"
+                                />
                               )}
                             </div>
                             <div className="flex items-center gap-3">
-                              <input type="checkbox" checked={po.invoicing[inv].approved} onChange={(e) => updateInvoicing(po.id, inv, 'approved', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-green-600" />
+                              <input
+                                type="checkbox"
+                                checked={po.invoicing[inv].approved}
+                                onChange={(e) => updateInvoicing(po.id, inv, 'approved', e.target.checked)}
+                                className="w-4 h-4 text-green-600"
+                              />
                               <span className="text-sm text-gray-700">Approved by PM on ERP</span>
                             </div>
                           </div>
@@ -634,16 +692,36 @@ export default function MultiUserStatusTracker() {
                       ))}
                       <div className="border-l-4 border-purple-500 pl-4">
                         <div className="flex items-center gap-3">
-                          <input type="checkbox" checked={po.invoicing.coc30.checked} onChange={(e) => updateInvoicing(po.id, 'coc30', 'checked', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-purple-600" />
+                          <input
+                            type="checkbox"
+                            checked={po.invoicing.coc30.checked}
+                            onChange={(e) => updateInvoicing(po.id, 'coc30', 'checked', e.target.checked)}
+                            className="w-4 h-4 text-purple-600"
+                          />
                           <span className="text-sm font-semibold text-gray-800 flex-1">30% COC</span>
-                          <input type="date" value={po.invoicing.coc30.sharedOn || ''} onChange={(e) => updateInvoicing(po.id, 'coc30', 'sharedOn', e.target.value)} disabled={isReadOnly} className="border border-gray-300 rounded px-2 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed" />
+                          <input
+                            type="date"
+                            value={po.invoicing.coc30.sharedOn || ''}
+                            onChange={(e) => updateInvoicing(po.id, 'coc30', 'sharedOn', e.target.value)}
+                            className="border border-gray-300 rounded px-2 py-1 text-sm"
+                          />
                         </div>
                       </div>
                       <div className="border-l-4 border-purple-500 pl-4">
                         <div className="flex items-center gap-3">
-                          <input type="checkbox" checked={po.invoicing.coc20.checked} onChange={(e) => updateInvoicing(po.id, 'coc20', 'checked', e.target.checked)} disabled={isReadOnly} className="w-4 h-4 text-purple-600" />
+                          <input
+                            type="checkbox"
+                            checked={po.invoicing.coc20.checked}
+                            onChange={(e) => updateInvoicing(po.id, 'coc20', 'checked', e.target.checked)}
+                            className="w-4 h-4 text-purple-600"
+                          />
                           <span className="text-sm font-semibold text-gray-800 flex-1">20% COC</span>
-                          <input type="date" value={po.invoicing.coc20.sharedOn || ''} onChange={(e) => updateInvoicing(po.id, 'coc20', 'sharedOn', e.target.value)} disabled={isReadOnly} className="border border-gray-300 rounded px-2 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed" />
+                          <input
+                            type="date"
+                            value={po.invoicing.coc20.sharedOn || ''}
+                            onChange={(e) => updateInvoicing(po.id, 'coc20', 'sharedOn', e.target.value)}
+                            className="border border-gray-300 rounded px-2 py-1 text-sm"
+                          />
                         </div>
                       </div>
                     </div>
@@ -651,44 +729,75 @@ export default function MultiUserStatusTracker() {
                 </div>
 
                 <div>
-                  <button onClick={() => toggleSection(po.id, 'campaigns')} className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition">
-                    <h3 className="text-lg font-semibold text-gray-800">2. Campaigns ({po.campaigns?.length || 0})</h3>
+                  <button
+                    onClick={() => toggleSection(po.id, 'campaigns')}
+                    className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition"
+                  >
+                    <h3 className="text-lg font-semibold text-gray-800">
+                      2. Campaigns ({po.campaigns?.length || 0})
+                    </h3>
                     {isSectionExpanded(po.id, 'campaigns') ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
                   </button>
                   {isSectionExpanded(po.id, 'campaigns') && (
                     <div className="p-4 bg-gray-50">
-                      {!isReadOnly && (
-                        <button onClick={() => addCampaign(po.id)} className="mb-4 flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition">
-                          <Plus size={16} />Add Campaign
-                        </button>
-                      )}
+                      <button
+                        onClick={() => addCampaign(po.id)}
+                        className="mb-4 flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+                      >
+                        <Plus size={16} />
+                        Add Campaign
+                      </button>
                       <div className="space-y-4">
                         {(po.campaigns || []).map(campaign => (
                           <div key={campaign.id} className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
                             <div className="flex justify-between items-start mb-3">
                               <h4 className="font-semibold text-gray-700">Campaign Details</h4>
-                              {!isReadOnly && (
-                                <button onClick={() => deleteCampaign(po.id, campaign.id)} className="text-red-500 hover:bg-red-50 p-1 rounded">
-                                  <Trash2 size={16} />
-                                </button>
-                              )}
+                              <button
+                                onClick={() => deleteCampaign(po.id, campaign.id)}
+                                className="text-red-500 hover:bg-red-50 p-1 rounded"
+                                title="Delete campaign (can be undone)"
+                              >
+                                <Trash2 size={16} />
+                              </button>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Campaign Name</label>
-                                <input type="text" value={campaign.name} onChange={(e) => updateCampaign(po.id, campaign.id, 'name', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter campaign name" />
+                                <input
+                                  type="text"
+                                  value={campaign.name}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'name', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                  placeholder="Enter campaign name"
+                                />
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Supplier Name</label>
-                                <input type="text" value={campaign.supplier} onChange={(e) => updateCampaign(po.id, campaign.id, 'supplier', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter supplier name" />
+                                <input
+                                  type="text"
+                                  value={campaign.supplier}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'supplier', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                  placeholder="Enter supplier name"
+                                />
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Total Cost to Client (SAR)</label>
-                                <input type="number" value={campaign.totalCost} onChange={(e) => updateCampaign(po.id, campaign.id, 'totalCost', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="0.00" />
+                                <input
+                                  type="number"
+                                  value={campaign.totalCost}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'totalCost', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                  placeholder="0.00"
+                                />
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Status</label>
-                                <select value={campaign.status} onChange={(e) => updateCampaign(po.id, campaign.id, 'status', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <select
+                                  value={campaign.status}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'status', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                >
                                   <option value="Not LIVE">Not LIVE</option>
                                   <option value="LIVE">LIVE</option>
                                   <option value="Completed">Completed</option>
@@ -696,7 +805,11 @@ export default function MultiUserStatusTracker() {
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Proposal</label>
-                                <select value={campaign.proposal} onChange={(e) => updateCampaign(po.id, campaign.id, 'proposal', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <select
+                                  value={campaign.proposal}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'proposal', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                >
                                   <option value="Not Started">Not Started</option>
                                   <option value="Requested">Requested</option>
                                   <option value="Pending PM approval">Pending PM approval</option>
@@ -705,31 +818,52 @@ export default function MultiUserStatusTracker() {
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">BO Shared</label>
-                                <select value={campaign.boShared} onChange={(e) => updateCampaign(po.id, campaign.id, 'boShared', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <select
+                                  value={campaign.boShared}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'boShared', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                >
                                   <option value="no">No</option>
                                   <option value="yes">Yes</option>
                                 </select>
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Tracker Shared</label>
-                                <select value={campaign.trackerShared} onChange={(e) => updateCampaign(po.id, campaign.id, 'trackerShared', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <select
+                                  value={campaign.trackerShared}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'trackerShared', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                >
                                   <option value="no">No</option>
                                   <option value="yes">Yes</option>
                                 </select>
                               </div>
                               <div className="md:col-span-2">
                                 <label className="text-xs text-gray-600 block mb-1">Next Steps</label>
-                                <textarea value={campaign.nextSteps} onChange={(e) => updateCampaign(po.id, campaign.id, 'nextSteps', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" rows="3" placeholder="Enter next steps..." />
+                                <textarea
+                                  value={campaign.nextSteps}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'nextSteps', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                  rows="3"
+                                  placeholder="Enter next steps..."
+                                />
                               </div>
                               <div>
                                 <label className="text-xs text-gray-600 block mb-1">Deadline Date</label>
-                                <input type="date" value={campaign.deadline} onChange={(e) => updateCampaign(po.id, campaign.id, 'deadline', e.target.value)} disabled={isReadOnly} className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" />
+                                <input
+                                  type="date"
+                                  value={campaign.deadline}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'deadline', e.target.value)}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                                />
                               </div>
                             </div>
                           </div>
                         ))}
                         {(!po.campaigns || po.campaigns.length === 0) && (
-                          <div className="text-center py-8 text-gray-400">No campaigns added yet. Click "Add Campaign" to get started.</div>
+                          <div className="text-center py-8 text-gray-400">
+                            No campaigns added yet. Click "Add Campaign" to get started.
+                          </div>
                         )}
                       </div>
                     </div>
@@ -743,14 +877,24 @@ export default function MultiUserStatusTracker() {
         {filteredPos.length === 0 && pos.length > 0 && (
           <div className="text-center py-12 text-gray-500">
             <p className="text-lg mb-4">No POs found for {geoFilter}</p>
-            <button onClick={() => setGeoFilter('All')} className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">Show All POs</button>
+            <button
+              onClick={() => setGeoFilter('All')}
+              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+            >
+              Show All POs
+            </button>
           </div>
         )}
 
         {pos.length === 0 && (
           <div className="text-center py-12 text-gray-500">
             <p className="text-lg mb-4">No POs added yet</p>
-            <button onClick={addPO} className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">Add Your First PO</button>
+            <button
+              onClick={addPO}
+              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+            >
+              Add Your First PO
+            </button>
           </div>
         )}
       </div>
