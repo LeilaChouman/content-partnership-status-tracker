@@ -41,12 +41,10 @@ export default function MultiUserStatusTracker() {
 
   const geoOptions = ['All', 'APAC', 'MEA', 'E&A', 'COE (Plan)'];
 
-  // Collapse all functionality
   const collapseAll = () => {
     setExpandedSections({});
   };
 
-  // Auth state listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -55,7 +53,6 @@ export default function MultiUserStatusTracker() {
     return () => unsubscribe();
   }, [auth]);
 
-  // Fetch user's organization and role
   useEffect(() => {
     if (!user) return;
     
@@ -67,7 +64,6 @@ export default function MultiUserStatusTracker() {
           setOrgId(userData.orgId || 'default-org');
           setUserRole(userData.role || 'editor');
         } else {
-          // Create default user profile if doesn't exist
           const defaultOrgId = 'default-org';
           await setDoc(doc(db, 'users', user.uid), {
             email: user.email,
@@ -86,7 +82,6 @@ export default function MultiUserStatusTracker() {
     fetchUserProfile();
   }, [user, db]);
 
-  // Listen to organization POs (shared data)
   useEffect(() => {
     if (!user || !orgId) return;
     
@@ -99,7 +94,6 @@ export default function MultiUserStatusTracker() {
     return () => unsubscribe();
   }, [user, orgId, db]);
 
-  // Track user presence
   useEffect(() => {
     if (!user || !orgId) return;
     
@@ -123,7 +117,6 @@ export default function MultiUserStatusTracker() {
     };
   }, [user, orgId, db]);
 
-  // Listen to active users
   useEffect(() => {
     if (!orgId) return;
     
@@ -236,13 +229,9 @@ export default function MultiUserStatusTracker() {
   const updatePOField = async (id, field, value) => {
     if (!user || !orgId) return;
     if (userRole === 'viewer') return;
-    
-    // Fix: Don't auto-format PO number - keep user input as-is
-    let finalValue = value;
-    
     try {
       await updateDoc(doc(db, 'organizations', orgId, 'pos', id), { 
-        [field]: finalValue,
+        [field]: value,
         lastModifiedBy: user.email,
         lastModifiedAt: new Date().toISOString()
       });
@@ -889,4 +878,142 @@ export default function MultiUserStatusTracker() {
                                   className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                   placeholder="Enter campaign name"
                                 />
-                              </div
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Supplier Name</label>
+                                <input
+                                  type="text"
+                                  value={campaign.supplier}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'supplier', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  placeholder="Enter supplier name"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Total Cost to Client (SAR)</label>
+                                <input
+                                  type="number"
+                                  value={campaign.totalCost}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'totalCost', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  placeholder="0.00"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Status</label>
+                                <select
+                                  value={campaign.status}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'status', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <option value="Not LIVE">Not LIVE</option>
+                                  <option value="LIVE">LIVE</option>
+                                  <option value="Completed">Completed</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Proposal</label>
+                                <select
+                                  value={campaign.proposal}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'proposal', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <option value="Not Started">Not Started</option>
+                                  <option value="Requested">Requested</option>
+                                  <option value="Pending PM approval">Pending PM approval</option>
+                                  <option value="Approved by PM">Approved by PM</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">BO Shared</label>
+                                <select
+                                  value={campaign.boShared}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'boShared', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <option value="no">No</option>
+                                  <option value="yes">Yes</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Tracker Shared</label>
+                                <select
+                                  value={campaign.trackerShared}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'trackerShared', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  <option value="no">No</option>
+                                  <option value="yes">Yes</option>
+                                </select>
+                              </div>
+                              <div className="md:col-span-2">
+                                <label className="text-xs text-gray-600 block mb-1">Next Steps</label>
+                                <textarea
+                                  value={campaign.nextSteps}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'nextSteps', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  rows="3"
+                                  placeholder="Enter next steps..."
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs text-gray-600 block mb-1">Deadline Date</label>
+                                <input
+                                  type="date"
+                                  value={campaign.deadline}
+                                  onChange={(e) => updateCampaign(po.id, campaign.id, 'deadline', e.target.value)}
+                                  disabled={isReadOnly}
+                                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {(!po.campaigns || po.campaigns.length === 0) && (
+                          <div className="text-center py-8 text-gray-400">
+                            No campaigns added yet. Click "Add Campaign" to get started.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {filteredPos.length === 0 && pos.length > 0 && (
+          <div className="text-center py-12 text-gray-500">
+            <p className="text-lg mb-4">No POs found for {geoFilter}</p>
+            <button
+              onClick={() => setGeoFilter('All')}
+              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+            >
+              Show All POs
+            </button>
+          </div>
+        )}
+
+        {pos.length === 0 && (
+          <div className="text-center py-12 text-gray-500">
+            <p className="text-lg mb-4">No POs added yet</p>
+            <button
+              onClick={addPO}
+              className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+            >
+              Add Your First PO
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
